@@ -1,0 +1,29 @@
+{
+  "name": "cap-demo",
+  "version": "1.0.0",
+  "dependencies": {
+    "@sap-cloud-sdk/connectivity": "^4.7.0",
+    "@sap-cloud-sdk/http-client": "^4.7.0",
+    "@sap-cloud-sdk/resilience": "^4.7.0",
+    "@sap/cds": "^9.9.2",
+    "@sap/xsenv": "^6.2.1",
+    "@sap/xssec": "^4.13.1"
+  },
+  "devDependencies": {
+    "@cap-js/sqlite": "^2.4.0",
+    "@sap/cds-dk": "^9.9.3"
+  },
+  "scripts": {
+    "start": "cds-serve"
+  },
+  "private": true,
+  "cds": {
+    "requires": {
+      "connectivity": true,
+      "destinations": true,
+      "[production]": {
+        "auth": "xsuaa"
+      }
+    }
+  }
+}
