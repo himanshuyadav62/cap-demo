@@ -5,6 +5,9 @@ const xsenv = require('@sap/xsenv')
 const DEFAULT_DESTINATION =
   process.env.DEFAULT_DESTINATION || process.env.DESTINATION || ''
 
+// Timeout for destination calls (ms). Default: 30 s. Set PROXY_TIMEOUT_MS to override.
+const PROXY_TIMEOUT_MS = Number.parseInt(process.env.PROXY_TIMEOUT_MS || '30000', 10)
+
 // Only the seed refresh token comes from env —
 // clientid, clientsecret, and token URL are read from the XSUAA service binding
 const REFRESH_TOKEN_SEED = process.env.REFRESH_TOKEN || ''
@@ -113,6 +116,13 @@ function buildForwardHeaders(req) {
 }
 
 cds.on('bootstrap', app => {
+  // Parse raw body early so req.body is available when this middleware runs,
+  // before CDS installs its own body parsers later in the bootstrap lifecycle.
+  const express = require('express')
+  app.use(express.json({ type: '*/*', limit: '10mb' }))
+  app.use(express.urlencoded({ extended: true, limit: '10mb' }))
+  app.use(express.raw({ type: '*/*', limit: '10mb' }))
+
   app.use(async (req, res) => {
     const destinationName = resolveDestination(req)
 
@@ -163,9 +173,12 @@ cds.on('bootstrap', app => {
           data: ['GET', 'HEAD'].includes(req.method) ? undefined : req.body,
           // Prevent axios from throwing on non-2xx — all HTTP responses are
           // returned as-is so we can proxy status + body straight to the client
-          validateStatus: () => true
+          validateStatus: () => true,
+          // Hard timeout so the request never hangs indefinitely
+          timeout: PROXY_TIMEOUT_MS
         }
       )
+      console.log('[proxy] response received in time')
 
       if (response.headers) {
         Object.entries(response.headers).forEach(([key, value]) => {
