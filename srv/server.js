@@ -1,6 +1,7 @@
 const cds = require('@sap/cds')
 const { executeHttpRequest } = require('@sap-cloud-sdk/http-client')
 const xsenv = require('@sap/xsenv')
+const { pipeline } = require('node:stream')
 
 const DEFAULT_DESTINATION =
   process.env.DEFAULT_DESTINATION || process.env.DESTINATION || ''
@@ -109,20 +110,23 @@ function resolveDestination(req) {
   return (req.header('X-DESTINATION') || DEFAULT_DESTINATION || '').trim()
 }
 
-function buildForwardHeaders(req) {
+function forwardHeaders(req) {
   const headers = { ...req.headers }
+  delete headers.host // must be calculated from the destination URL
   delete headers['x-destination']
   return headers
 }
 
-cds.on('bootstrap', app => {
-  // Parse raw body early so req.body is available when this middleware runs,
-  // before CDS installs its own body parsers later in the bootstrap lifecycle.
-  const express = require('express')
-  app.use(express.json({ type: '*/*', limit: '10mb' }))
-  app.use(express.urlencoded({ extended: true, limit: '10mb' }))
-  app.use(express.raw({ type: '*/*', limit: '10mb' }))
+function relay(res, response) {
+  const headers = response.headers?.toJSON?.() || response.headers
+  if (response.statusText) res.writeHead(response.status, response.statusText, headers)
+  else res.writeHead(response.status, headers)
+  pipeline(response.data, res, error => {
+    if (error && !res.destroyed) res.destroy(error)
+  })
+}
 
+cds.on('bootstrap', app => {
   app.use(async (req, res) => {
     const destinationName = resolveDestination(req)
 
@@ -150,9 +154,9 @@ cds.on('bootstrap', app => {
 
     // Build forwarded headers; inject the obtained token if the request
     // did not carry an Authorization header itself
-    const forwardHeaders = buildForwardHeaders(req)
+    const headers = forwardHeaders(req)
     if (jwt && !authHeader) {
-      forwardHeaders['authorization'] = `Bearer ${jwt}`
+      headers.authorization = `Bearer ${jwt}`
     }
 
     console.log('[proxy] ------ incoming request ------')
@@ -169,38 +173,42 @@ cds.on('bootstrap', app => {
         {
           method: req.method,
           url: req.originalUrl,
-          headers: forwardHeaders,
-          data: ['GET', 'HEAD'].includes(req.method) ? undefined : req.body,
+          headers,
+          // Forward the untouched incoming bytes instead of a parsed body.
+          data: ['GET', 'HEAD'].includes(req.method) ? undefined : req,
+          // Keep the destination response as a raw stream. Disabling automatic
+          // decompression keeps content-encoding and content-length valid.
+          responseType: 'stream',
+          decompress: false,
           // Prevent axios from throwing on non-2xx — all HTTP responses are
           // returned as-is so we can proxy status + body straight to the client
           validateStatus: () => true,
           // Hard timeout so the request never hangs indefinitely
           timeout: PROXY_TIMEOUT_MS
-        }
+        },
+        // A transparent proxy must not introduce a separate CSRF preflight.
+        // Any client-supplied CSRF header is forwarded with the request.
+        { fetchCsrfToken: false }
       )
       console.log('[proxy] response received in time')
 
-      if (response.headers) {
-        Object.entries(response.headers).forEach(([key, value]) => {
-          if (key.toLowerCase() !== 'transfer-encoding') {
-            res.setHeader(key, value)
-          }
-        })
-      }
-
       console.log('[proxy] response status:', response.status)
-      return res.status(response.status).send(response.data)
+      return relay(res, response)
     } catch (error) {
-      // Only reaches here on network-level / SDK failures (no HTTP response)
       console.error('[proxy] ------ destination call failed ------')
       console.error('[proxy] destination    :', destinationName)
       console.error('[proxy] error message  :', error.message)
       console.error('[proxy] stack trace    :\n', error.stack)
-      if (error.response) {
-        console.error('[proxy] http status    :', error.response.status)
-        console.error('[proxy] response body  :', JSON.stringify(error.response.data, null, 2))
+
+      const upstreamResponse = error.response || error.cause?.response
+      if (upstreamResponse) {
+        console.error('[proxy] http status    :', upstreamResponse.status)
+        return relay(res, upstreamResponse)
       }
-      return res.status(502).json({
+
+      const timedOut = ['ECONNABORTED', 'ETIMEDOUT'].includes(error.code)
+      const status = timedOut ? 504 : 502
+      return res.status(status).json({
         error: 'Destination call failed',
         details: error.message
       })

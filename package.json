@@ -14,7 +14,8 @@
     "@sap/cds-dk": "^9.9.3"
   },
   "scripts": {
-    "start": "cds-serve"
+    "start": "cds-serve",
+    "test": "node --test --test-isolation=none"
   },
   "private": true,
   "cds": {
