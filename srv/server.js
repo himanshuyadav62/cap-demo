@@ -112,7 +112,6 @@ function resolveDestination(req) {
 
 function forwardHeaders(req) {
   const headers = { ...req.headers }
-  delete headers.host // must be calculated from the destination URL
   delete headers['x-destination']
   return headers
 }
@@ -137,39 +136,53 @@ cds.on('bootstrap', app => {
       })
     }
 
-    // 1. Try the Authorization header from the incoming request
-    // 2. Fall back to refresh token flow if header is absent
+    // 1. Use an incoming bearer token when present.
+    // 2. Otherwise try the configured refresh token.
+    // 3. With neither (or when refresh fails), use destination authentication.
     const authHeader = req.header('authorization') || ''
-    let jwt = authHeader.replace(/^Bearer\s+/i, '').trim() || undefined
+    const bearerMatch = authHeader.match(/^Bearer\s+(.+)$/i)
+    let jwt = bearerMatch?.[1].trim() || undefined
+    let jwtSource = jwt ? 'header' : 'destination'
 
-    if (!jwt) {
-      console.log('[proxy] no auth header — attempting refresh token flow')
+    if (!jwt && tokenCache.refreshToken) {
+      console.log('[proxy] no bearer token — attempting refresh token flow')
       try {
         jwt = await getAccessToken()
+        jwtSource = 'refresh_token'
         console.log('[proxy] access token obtained via refresh token')
       } catch (err) {
         console.error('[proxy] refresh token flow failed:', err.message)
+        console.log('[proxy] continuing without jwt — using destination-configured authentication')
       }
+    } else if (!jwt) {
+      console.log('[proxy] no bearer or refresh token — using destination-configured authentication')
     }
 
     // Build forwarded headers; inject the obtained token if the request
     // did not carry an Authorization header itself
     const headers = forwardHeaders(req)
-    if (jwt && !authHeader) {
+    if (jwt && !bearerMatch) {
       headers.authorization = `Bearer ${jwt}`
+    } else if (!jwt) {
+      // A request-level Authorization header would override Basic Authentication
+      // (or another authentication type) configured on the destination.
+      delete headers.authorization
     }
+
+    // Omitting the jwt property is intentional: an undefined jwt can still alter
+    // destination lookup/authentication behavior in the Cloud SDK.
+    const destination = jwt ? { destinationName, jwt } : { destinationName }
 
     console.log('[proxy] ------ incoming request ------')
     console.log('[proxy] method         :', req.method)
     console.log('[proxy] url            :', req.originalUrl)
     console.log('[proxy] destination    :', destinationName)
     console.log('[proxy] jwt present    :', !!jwt)
-    console.log('[proxy] jwt source     :', authHeader ? 'header' : jwt ? 'refresh_token' : 'none')
-    console.log('[proxy] jwt (first 40) :', jwt ? jwt.substring(0, 40) + '...' : 'none')
+    console.log('[proxy] jwt source     :', jwtSource)
 
     try {
       const response = await executeHttpRequest(
-        { destinationName, jwt },
+        destination,
         {
           method: req.method,
           url: req.originalUrl,
@@ -186,9 +199,9 @@ cds.on('bootstrap', app => {
           // Hard timeout so the request never hangs indefinitely
           timeout: PROXY_TIMEOUT_MS
         },
-        // A transparent proxy must not introduce a separate CSRF preflight.
-        // Any client-supplied CSRF header is forwarded with the request.
-        { fetchCsrfToken: false }
+        // Let SAP Cloud SDK fetch the CSRF token and its matching session
+        // cookies before modification requests (POST/PUT/PATCH/DELETE).
+        { fetchCsrfToken: true }
       )
       console.log('[proxy] response received in time')
 
