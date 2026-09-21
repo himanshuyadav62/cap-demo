@@ -2,6 +2,8 @@ const cds = require('@sap/cds')
 const { executeHttpRequest } = require('@sap-cloud-sdk/http-client')
 const xsenv = require('@sap/xsenv')
 const { pipeline } = require('node:stream')
+const forwardHeaders = require('./forward-headers')
+const proxyRedirects = require('./proxy-redirects')
 
 const DEFAULT_DESTINATION =
   process.env.DEFAULT_DESTINATION || process.env.DESTINATION || ''
@@ -110,12 +112,6 @@ function resolveDestination(req) {
   return (req.header('X-DESTINATION') || DEFAULT_DESTINATION || '').trim()
 }
 
-function forwardHeaders(req) {
-  const headers = { ...req.headers }
-  delete headers['x-destination']
-  return headers
-}
-
 function relay(res, response) {
   const headers = response.headers?.toJSON?.() || response.headers
   if (response.statusText) res.writeHead(response.status, response.statusText, headers)
@@ -158,16 +154,9 @@ cds.on('bootstrap', app => {
       console.log('[proxy] no bearer or refresh token — using destination-configured authentication')
     }
 
-    // Build forwarded headers; inject the obtained token if the request
-    // did not carry an Authorization header itself
+    // Use the caller JWT only for destination lookup. The SDK supplies backend
+    // authentication and the separate Connectivity service proxy token.
     const headers = forwardHeaders(req)
-    if (jwt && !bearerMatch) {
-      headers.authorization = `Bearer ${jwt}`
-    } else if (!jwt) {
-      // A request-level Authorization header would override Basic Authentication
-      // (or another authentication type) configured on the destination.
-      delete headers.authorization
-    }
 
     // Omitting the jwt property is intentional: an undefined jwt can still alter
     // destination lookup/authentication behavior in the Cloud SDK.
@@ -187,6 +176,7 @@ cds.on('bootstrap', app => {
           method: req.method,
           url: req.originalUrl,
           headers,
+          middleware: [proxyRedirects],
           // Forward the untouched incoming bytes instead of a parsed body.
           data: ['GET', 'HEAD'].includes(req.method) ? undefined : req,
           // Keep the destination response as a raw stream. Disabling automatic

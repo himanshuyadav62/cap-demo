@@ -46,7 +46,7 @@ resources:
       service-plan: application
       path: ./xs-security.json
       config:
-        xsappname: cap-demo-${org}-${space}
+        xsappname: cap-demo-${org}
         tenant-mode: dedicated
         oauth2-configuration:
           credential-types:
